@@ -1,0 +1,60 @@
+//Used to deal damage to Actors
+FHitResult Azadanie_Piotr_GniadoCharacter::DamageTrace()
+{
+	FHitResult HitResult;
+	if (bCanAttack)
+	{
+		//Trace in front of camera
+		const TArray<AActor*> ActorsToIgnore;
+		const FVector TraceStart = UGameplayStatics::GetPlayerCameraManager(this, 0)->GetCameraLocation();
+		const FVector TraceEnd = TraceStart + UGameplayStatics::GetPlayerCameraManager(this, 0)->GetActorForwardVector() * DamageTraceRange;
+		UKismetSystemLibrary::SphereTraceSingle(this, TraceStart,
+			TraceEnd,
+			30.0, UEngineTypes::ConvertToTraceType(ECC_Visibility),
+			false,
+			ActorsToIgnore,
+			EDrawDebugTrace::None,
+			HitResult,
+			true);
+
+		if (IsValid(HitResult.GetActor()))
+		{
+			//Apply damage to traced Actor if it has the Health Component
+			UHealthComponent* HealthComponent = HitResult.GetActor()->FindComponentByClass<UHealthComponent>();
+			if (IsValid(HealthComponent))
+			{
+				TSubclassOf<UDamageType> DamageType;
+				UGameplayStatics::ApplyDamage(HitResult.GetActor(), 35.0,
+				UGameplayStatics::GetPlayerController(this, 0),
+				UGameplayStatics::GetPlayerCharacter(this, 0), DamageType);
+			}
+			//Check if we hit a Foliage Actor
+			else
+			{
+				UFoliageInstancedStaticMeshComponent* HitFoliageInstance = Cast<UFoliageInstancedStaticMeshComponent>(HitResult.GetComponent());
+				if (HitFoliageInstance)
+				{
+					FTransform InstanceTransform;
+					HitFoliageInstance->GetInstanceTransform(HitResult.Item, InstanceTransform, true);
+					UObject* SpawnActor = Cast<UObject>(StaticLoadObject(UObject::StaticClass(), NULL,
+						TEXT("/Game/Blueprints/BP_TreeFoliage.BP_TreeFoliage")));
+
+					//Spawn Blueprint class of DestructibleTree and adjust its transform and mesh
+					UBlueprint* TreeBP = Cast<UBlueprint>(SpawnActor);
+					UWorld* World = GetWorld();
+					FActorSpawnParameters SpawnParams;
+					SpawnParams.Owner = this;
+					SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+					ADestructibleTree* DestructibleTree = Cast<ADestructibleTree>(World->SpawnActor<AActor>(TreeBP->GeneratedClass, InstanceTransform.GetLocation(), InstanceTransform.Rotator(), SpawnParams));
+					DestructibleTree->SetActorScale3D(InstanceTransform.GetScale3D());
+					DestructibleTree->SetTreeMesh(HitFoliageInstance->GetStaticMesh());
+					HitFoliageInstance->RemoveInstance(HitResult.Item);
+				
+					//Apply damage to the spawned tree
+					UGameplayStatics::ApplyDamage(DestructibleTree, 35.0, UGameplayStatics::GetPlayerController(this, 0), UGameplayStatics::GetPlayerCharacter(this, 0), UDamageType::StaticClass());
+				}
+			}
+		}
+	}
+	return HitResult;
+}
