@@ -1,0 +1,226 @@
+#include "EnergyKeeperCharacter.h"
+#include "Camera/CameraComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "Components/InputComponent.h"
+#include "PhysicsEngine/RadialForceComponent.h"
+
+
+AEnergyKeeperCharacter::AEnergyKeeperCharacter()
+{
+	// Set size for player capsule
+	GetCapsuleComponent()->InitCapsuleSize(42.f, 96.0f);
+
+	// Don't rotate character to camera direction
+	bUseControllerRotationPitch = false;
+	bUseControllerRotationYaw = false;
+	bUseControllerRotationRoll = false;
+
+	// Configure character movement
+	GetCharacterMovement()->bOrientRotationToMovement = true; // Rotate character to moving direction
+	GetCharacterMovement()->RotationRate = FRotator(0.f, 640.f, 0.f);
+	GetCharacterMovement()->bConstrainToPlane = true;
+	GetCharacterMovement()->bSnapToPlaneAtStart = true;
+
+	// Create a camera boom...
+	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
+	CameraBoom->SetupAttachment(RootComponent);
+	CameraBoom->SetUsingAbsoluteRotation(true); // Don't want arm to rotate when character does
+	CameraBoom->TargetArmLength = 800.f;
+	CameraBoom->SetRelativeRotation(FRotator(-60.f, 0.f, 0.f));
+	CameraBoom->bEnableCameraLag = true;
+	CameraBoom->CameraLagSpeed = DefaultLagSpeed;
+	CameraBoom->bDoCollisionTest = false; // Don't want to pull camera in when it collides with level
+
+	// Create a camera...
+	TopDownCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("TopDownCamera"));
+	TopDownCameraComponent->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
+	TopDownCameraComponent->bUsePawnControlRotation = false; // Camera does not rotate relative to arm
+
+	// Activate ticking in order to update the cursor every frame.
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = true;
+
+	CollisionCapsule = CreateDefaultSubobject<UCapsuleComponent>(TEXT("EnemyCollider"));
+	CollisionCapsule->SetupAttachment(RootComponent);
+	CollisionCapsule->SetUseCCD(true);
+	CollisionCapsule->SetCollisionResponseToAllChannels(ECR_Ignore);
+	CollisionCapsule->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+	CollisionCapsule->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
+	CollisionCapsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	
+}
+
+
+void AEnergyKeeperCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+	GetCharacterMovement()->MaxWalkSpeed = DefaultMovementSpeed;
+	OnEnergyDrained.BindUFunction(this, "MovementDrainEnergy");
+	GetWorldTimerManager().SetTimer(MovementEnergyDepletionTimer, OnEnergyDrained, 0.1f, true, 0.1f);
+}
+
+//Increase/Decrease player's Energy
+
+void AEnergyKeeperCharacter::AddPlayerEnergy(const float StaminaIncrement)
+{
+	Energy = FMath::Clamp(Energy + StaminaIncrement, 0.0, 100.0);
+	EventPlayerEnergyChanged(Energy);
+}
+
+void AEnergyKeeperCharacter::DecreasePlayerEnergy(const float StaminaDecrement)
+{
+	Energy = FMath::Clamp(Energy - StaminaDecrement, 0.0, MaxEnergy);
+	EventPlayerEnergyChanged(Energy);
+}
+
+//Character Energy getters
+
+float AEnergyKeeperCharacter::GetPlayerEnergy() const
+{
+	return Energy;
+}
+
+float AEnergyKeeperCharacter::GetPlayerMaxEnergy() const
+{
+	return MaxEnergy;
+}
+
+//Continously decrease character's energy during movement (runs on a timer)
+void AEnergyKeeperCharacter::MovementDrainEnergy()
+{
+	if (Energy > 0)
+	{
+		if (GetMovementComponent()->Velocity.Size2D() > 0 && !bIsSprinting)
+		{
+			DecreasePlayerEnergy(EnergyMovementDrainRate * (GetMovementComponent()->Velocity.Size2D() / DefaultMovementSpeed));
+		}
+		else if (GetMovementComponent()->Velocity.Size2D() > 0 && bIsSprinting)
+		{
+			DecreasePlayerEnergy(SprintEnergyUsageRate);
+		}
+	}
+	else if (bIsSprinting)
+	{
+		UnSprint();
+	}
+}
+
+void AEnergyKeeperCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupPlayerInputComponent(PlayerInputComponent);
+
+	//Bind event to Sprint button pressed/released
+	PlayerInputComponent->BindAction("Sprint", IE_Pressed, this, &AEnergyKeeperCharacter::Sprint);
+	PlayerInputComponent->BindAction("Sprint", IE_Released, this, &AEnergyKeeperCharacter::UnSprint);
+	
+	//Bind event to Interact button pressed/released
+	PlayerInputComponent->BindAction("Interact", IE_Pressed, this, &AEnergyKeeperCharacter::DoInteract);
+	PlayerInputComponent->BindAction("Interact", IE_Released, this, &AEnergyKeeperCharacter::EndInteract);
+
+	//Bind event to Dash button pressed
+	PlayerInputComponent->BindAction("Dash", IE_Pressed, this, &AEnergyKeeperCharacter::UseDash);
+}
+
+//Called when player presses the Interact button
+void AEnergyKeeperCharacter::DoInteract()
+{
+	if (CollectorRef)
+	{
+		if (CollectorRef->GetAccumulatedEnergy() < CollectorRef->MaxEnergyAccumulated && Energy > 0)
+		{
+			CollectorRef->BeginEnergyTransfer();
+		}
+	}
+}
+
+//Called when player releases the Interact button
+void AEnergyKeeperCharacter::EndInteract()
+{
+	if (CollectorRef)
+	{
+		CollectorRef->EndEnergyTransfer();
+	}
+}
+
+//Called by Energy Collector, sets character's Collector reference
+void AEnergyKeeperCharacter::SetEnergyCollector(AEnergyCollector* CollectorP)
+{
+	CollectorRef = CollectorP;
+}
+
+
+void AEnergyKeeperCharacter::DashEnded()
+{
+	GetCharacterMovement()->GravityScale = 1.0;
+	GetWorldTimerManager().SetTimer(DashTimer, this, &AEnergyKeeperCharacter::ResetDashPhysics, 0.1f, true, 0.1f);
+}
+
+void AEnergyKeeperCharacter::ResetDash()
+{
+	bCanUseDash = true;
+	OnDashReset.ExecuteIfBound();
+}
+
+void AEnergyKeeperCharacter::ResetDashPhysics()
+{
+	if (!GetMovementComponent()->IsFalling())
+	{
+		CameraBoom->CameraLagSpeed = DefaultLagSpeed;
+		CollisionCapsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+		GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
+		GetMesh()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+		DashTimer.Invalidate();
+	}
+}
+
+//Dash ability
+void AEnergyKeeperCharacter::UseDash()
+{
+	if (Energy > DashEnergyRequirement && bCanUseDash && !GetMovementComponent()->IsFalling())
+	{
+		bCanUseDash = false;
+		
+		CollisionCapsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Ignore);
+		GetMesh()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+
+		URadialForceComponent* Force = NewObject<URadialForceComponent>(this);
+		Force->AttachToComponent(GetCapsuleComponent(), FAttachmentTransformRules::KeepRelativeTransform, "None");
+		Force->RegisterComponent();
+		Force->Radius = DashPower / 4;
+		Force->ForceStrength = DashPower;
+		Force->ImpulseStrength = DashPower;
+		Force->FireImpulse();
+		Force->DestroyComponent();
+		CameraBoom->CameraLagSpeed = LagSpeedMultiplier * DashPower;
+		ACharacter::LaunchCharacter(GetActorForwardVector() * DashPower + GetActorUpVector() + 10, true, true);
+		GetCharacterMovement()->GravityScale = 0.0;
+		Energy = FMath::Clamp(Energy - DashEnergyRequirement, 0.0, MaxEnergy);
+		EventPlayerEnergyChanged(Energy);
+		
+		GetWorldTimerManager().SetTimer(DashTimer, this, &AEnergyKeeperCharacter::DashEnded, DashDuration, false, DashDuration);
+		GetWorldTimerManager().SetTimer(DashCooldownTimer, this, &AEnergyKeeperCharacter::ResetDash, DashCooldownDuration, false, DashCooldownDuration);
+		OnDashUsed.ExecuteIfBound(DashCooldownTimer, DashCooldownDuration);
+	}
+}
+
+
+
+void AEnergyKeeperCharacter::Sprint()
+{
+	if (Energy > 0)
+	{
+		bIsSprinting = true;
+		GetCharacterMovement()->MaxWalkSpeed = DefaultMovementSpeed * SprintSpeedMultiplier;
+	}
+}
+
+void AEnergyKeeperCharacter::UnSprint()
+{
+	bIsSprinting = false;
+	GetCharacterMovement()->MaxWalkSpeed = DefaultMovementSpeed;
+}
