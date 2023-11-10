@@ -1,0 +1,187 @@
+#include "MainPC.h"
+#include "MasterUnit.h"
+#include "TestHUD.h"
+#include "UnitAIController.h"
+
+AMainPC::AMainPC()
+{
+
+}
+
+void AMainPC::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupInputComponent();
+
+	//Bind event to Interact button pressed/released
+	PlayerInputComponent->BindAction("Select/Interact", IE_Pressed, this, &AMainPC::DoInteract);
+	PlayerInputComponent->BindAction("Select/Interact", IE_Released, this, &AMainPC::EndInteract);
+	PlayerInputComponent->BindAction("OrderUnits", IE_Pressed, this, &AMainPC::OrderUnits);
+}
+
+
+void AMainPC::DoInteract()
+{
+	float DeltaX{};
+	float DeltaY{};
+	GetWorld()->GetFirstPlayerController()->GetInputMouseDelta(DeltaX, DeltaY);
+	if (FMath::Abs(DeltaX + DeltaY) >= 0.05)
+	{
+		BoxSelect();
+	}
+	else
+	{
+		FTimerDelegate BoxSelectDelegate;
+		BoxSelectDelegate.BindUFunction(this, "BoxSelect");
+		GetWorldTimerManager().SetTimer(BoxSelectTimer, BoxSelectDelegate, 0.1f, false, 0.1);
+	}
+}
+
+void AMainPC::EndInteract()
+{
+	if (!IsInputKeyDown("LeftShift"))
+	{
+		ClearSelectedUnits();
+	}
+	if (bBoxSelectionActive)
+	{
+		EndBoxSelect(false);
+		GetWorldTimerManager().ClearTimer(BoxSelectTimer);
+	}
+	else
+	{
+		FHitResult HitResult;
+		GetWorld()->GetFirstPlayerController()->GetHitResultUnderCursor(ECC_Camera, false, HitResult);
+		if (IsValid(HitResult.GetActor()))
+		{
+			if (AMasterUnit* UnitToAdd = Cast<AMasterUnit>(HitResult.GetActor()))
+			{
+				if (UnitToAdd->Team == Team)
+				{	
+					UnitToAdd->UnitSelected_Unselected(true);
+					AddUnitToSelection(HitResult.GetActor());
+				}
+				else
+				{
+					ClearSelectedUnits();
+					EndBoxSelect(GetWorldTimerManager().IsTimerActive(BoxSelectTimer));
+					GetWorldTimerManager().ClearTimer(BoxSelectTimer);
+				}
+			}
+			else
+			{
+				ClearSelectedUnits();
+				EndBoxSelect(true);
+				GetWorldTimerManager().ClearTimer(BoxSelectTimer);
+			}
+		}
+		else
+		{
+			ClearSelectedUnits();
+			EndBoxSelect(true);
+			GetWorldTimerManager().ClearTimer(BoxSelectTimer);
+		}
+	}
+}
+
+void AMainPC::ClearSelectedUnits()
+{
+	if (SelectedActors.IsValidIndex(0))
+	{
+		for (AActor* Actor : SelectedActors)
+		{
+			if (AMasterUnit* Unit = Cast<AMasterUnit>(Actor))
+			{
+				Unit->UnitSelected_Unselected(false);
+			}
+		}
+		SelectedActors.Empty();
+		AmountOfSelectedUnits = 0;
+	}
+}
+
+void AMainPC::AddUnitToSelection(AActor* Actor)
+{
+	SelectedActors.Add(Actor);
+	AmountOfSelectedUnits++;
+}
+
+
+
+
+void AMainPC::BoxSelect()
+{
+	if (GetWorld()->GetFirstPlayerController()->IsInputKeyDown("LeftMouseButton"))
+	{
+		Cast<ATestHUD>(GetHUD())->SelectionMode(false);
+		bBoxSelectionActive = true;
+	}
+}
+
+
+void AMainPC::EndBoxSelect(bool Cancel)
+{
+	ATestHUD* HUD = Cast<ATestHUD>(GetHUD());
+	bBoxSelectionActive = false;
+	if (!Cancel)
+	{
+		BoxSelectUnits(HUD->UnitsToSelect);
+		HUD->SelectionMode(true);
+	}
+	else
+	{
+		HUD->SelectionMode(true);
+	}
+}
+
+void AMainPC::BoxSelectUnits(TArray<AActor*> Units)
+{
+	ClearSelectedUnits();
+	SelectedActors = Units;
+	for (AActor* Unit : Units)
+	{
+		if (AMasterUnit* UnitToSelect = Cast<AMasterUnit>(Unit))
+		{
+			if (UnitToSelect->Team == Team)
+			{
+				UnitToSelect->UnitSelected_Unselected(true);
+			}
+			else
+			{
+				SelectedActors.Remove(UnitToSelect);
+			}
+		}
+	}
+}
+
+
+int AMainPC::GetAmountOfSelectedUnits() const
+{
+	return SelectedActors.Num();
+}
+void AMainPC::OrderUnits()
+{
+	for (AActor* Actor : SelectedActors)
+	{
+		if (AMasterUnit* Unit = Cast<AMasterUnit>(Actor))
+		{
+			FHitResult HitResult;
+			GetHitResultUnderCursor(ECC_Camera, false, HitResult);
+			FVector const TargetLoc = HitResult.Location;
+			if (AMasterUnit* Enemy = Cast<AMasterUnit>(HitResult.GetActor()))
+			{
+				if (Enemy->Team != Team)
+				{
+					Unit->HostileUnitDetected(Enemy);
+				}
+				else
+				{
+					Unit->fMoveUnitToLocation(TargetLoc, GetAmountOfSelectedUnits() < 2);
+				}
+			}
+			else
+			{
+				Unit->fMoveUnitToLocation(TargetLoc, GetAmountOfSelectedUnits() < 2);
+			}
+		}
+	}
+}
