@@ -1,5 +1,5 @@
 //Used to deal damage to Actors
-FHitResult Azadanie_Piotr_GniadoCharacter::DamageTrace()
+FHitResult ACharacter::DamageTrace()
 {
 	FHitResult HitResult;
 	if (bCanAttack)
